@@ -73,20 +73,46 @@ function check_openscad_installed()
     end
 end
 
+function install_dependencies()
+    # Get the directory of the current script
+    script_dir = dirname(@__FILE__)
+    deps_script = joinpath(script_dir, "_assets", "scad", "dependencies.sh")
+    
+    # Check if dependencies.sh exists
+    if !isfile(deps_script)
+        error("dependencies.sh not found at: $deps_script")
+        return false
+    end
+    
+    # Make sure the script is executable
+    chmod(deps_script, 0o755)
+    
+    try
+        # Run the dependencies script
+        @info "Installing OpenSCAD dependencies..."
+        run(`$deps_script`)
+        @info "Dependencies installed successfully"
+        return true
+    catch e
+        @error "Failed to install dependencies: $e"
+        return false
+    end
+end
+
 function get_file_modification_time(file_path::String)
     return stat(file_path).mtime
 end
 
-function load_render_log(output_dir::String)
-    log_path = joinpath(output_dir, "render_log.json")
+function load_render_log(input_dir::String)
+    log_path = joinpath(input_dir, "render_log.json")
     if isfile(log_path)
         return JSON.parsefile(log_path)
     end
     return Dict{String, Dict{String, Any}}()
 end
 
-function save_render_log(output_dir::String, log::Dict)
-    log_path = joinpath(output_dir, "render_log.json")
+function save_render_log(input_dir::String, log::Dict)
+    log_path = joinpath(input_dir, "render_log.json")
     open(log_path, "w") do f
         JSON.print(f, log, 2)  # Pretty print with 2-space indentation
     end
@@ -260,20 +286,52 @@ function render_openscad_to_png(input_file::String; output_dir::String=".", widt
     end
 end
 
-function update_render_log(output_dir::String, log::Dict, filename::String, entry::Dict)
+function update_render_log(input_dir::String, log::Dict, filename::String, entry::Dict)
     # Update the log with the new entry
     log[filename] = entry
     
     # Save the updated log
-    save_render_log(output_dir, log)
+    save_render_log(input_dir, log)
+end
+
+function cleanup_stale_files(input_dir::String, output_dir::String)
+    # Get list of SCAD files from input directory
+    scad_files = filter(file -> endswith(file, ".scad"), readdir(input_dir))
+    scad_base_names = [splitext(file)[1] for file in scad_files]
+    
+    # Get list of files in output directory
+    output_files = readdir(output_dir)
+    
+    # Remove files that don't correspond to any SCAD file
+    for file in output_files
+        base_name = splitext(file)[1]
+        if !(base_name in scad_base_names)
+            file_path = joinpath(output_dir, file)
+            if isfile(file_path)
+                @warn "Removing stale file: $file"
+                rm(file_path)
+            end
+        end
+    end
 end
 
 function main(input_dir::String; output_dir::String=".", width=1024, height=1024, blacklist::Vector{String}=String[], timeout::Int=300, force::Bool=false)
     # Create output directory if it doesn't exist
     mkpath(output_dir)
     
+    # Check OpenSCAD installation and get version
+    version = check_openscad_installed()
+    @info "Detected OpenSCAD version: $version"
+    
     # Load previous render log
-    render_log = load_render_log(output_dir)
+    render_log = load_render_log(input_dir)
+    
+    # Only install dependencies if render_log.json doesn't exist
+    if isempty(render_log)
+        if !install_dependencies()
+            @warn "Failed to install dependencies. Some SCAD files may not render correctly."
+        end
+    end
     
     # Get all .scad files from input directory
     scad_files = filter(file -> endswith(file, ".scad"), readdir(input_dir))
@@ -355,8 +413,11 @@ function main(input_dir::String; output_dir::String=".", width=1024, height=1024
         end
         
         # Update the log after each file is processed
-        update_render_log(output_dir, render_log, scad_file, log_entry)
+        update_render_log(input_dir, render_log, scad_file, log_entry)
     end
+    
+    # Clean up stale files after processing
+    cleanup_stale_files(input_dir, output_dir)
 end
 
 # Main execution
